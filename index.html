@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Crypto Trading Journal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Use UMD build safely -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
+<div class="max-w-7xl mx-auto" id="reportArea">
+  <h1 class="text-3xl font-bold mb-6">📓 Crypto Trading Journal (Pro) <span class="text-sm font-normal text-gray-500">• Kurs IDR tetap: 16.750</span></h1>
+
+  <div class="bg-white p-4 rounded-xl shadow mb-6 grid grid-cols-1 md:grid-cols-6 gap-4">
+    <input type="month" id="filterMonth" class="border p-2 rounded" />
+    <input type="text" id="filterAsset" placeholder="Filter Aset (BTC, ETH...)" class="border p-2 rounded" />
+    <select id="exportMode" class="border p-2 rounded">
+      <option value="filtered">Export data terfilter</option>
+      <option value="all">Export semua data</option>
+    </select>
+    <button id="btnFilter" class="bg-gray-800 text-white rounded">Filter</button>
+    <button id="btnCSV" class="bg-green-600 text-white rounded">Export CSV</button>
+    <button id="btnPDF" class="bg-red-600 text-white rounded">Export PDF</button>
+  </div>
+
+  <div class="bg-white p-6 rounded-2xl shadow mb-8">
+    <form id="journalForm" class="grid grid-cols-1 md:grid-cols-6 gap-4">
+      <input type="date" id="date" class="border p-2 rounded" required />
+      <input type="text" id="asset" placeholder="BTC, ETH, SOL" class="border p-2 rounded" required />
+      <input type="number" id="leverage" placeholder="Leverage (x)" step="any" class="border p-2 rounded" />
+      <input type="number" id="capital" placeholder="Modal (USD)" step="any" class="border p-2 rounded" />
+      <input type="number" id="pnl" placeholder="PnL (USD)" step="any" class="border p-2 rounded" />
+      <select id="position" class="border p-2 rounded"><option>Long</option><option>Short</option></select>
+      <textarea id="reason" placeholder="Alasan entry" class="border p-2 rounded md:col-span-6"></textarea>
+      <input type="url" id="chartLink" placeholder="TradingView Link" class="border p-2 rounded md:col-span-3" />
+      <input type="file" id="chartImage" accept="image/*" class="border p-2 rounded md:col-span-3" />
+      <button class="bg-blue-600 text-white p-2 rounded md:col-span-6">Simpan</button>
+    </form>
+  </div>
+
+  <div class="bg-white p-4 rounded-xl shadow mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 text-center">
+    <div><div class="text-gray-500 text-sm">Total Trade</div><div id="statTotalTrade" class="text-xl font-bold">0</div></div>
+    <div><div class="text-gray-500 text-sm">Win Rate</div><div id="statWinRate" class="text-xl font-bold">0%</div></div>
+    <div><div class="text-gray-500 text-sm">Total PnL (USD)</div><div id="statTotalUsd" class="text-xl font-bold">$0</div></div>
+    <div><div class="text-gray-500 text-sm">Total PnL (IDR)</div><div id="statTotalIdr" class="text-xl font-bold">Rp 0</div></div>
+  </div>
+
+  <div class="bg-white p-6 rounded-2xl shadow mb-8 overflow-x-auto">
+    <table class="w-full text-sm border-collapse">
+      <thead class="border-b bg-gray-50">
+        <tr class="text-left">
+          <th class="p-2">Tanggal</th>
+          <th class="p-2">Aset</th>
+          <th class="p-2">Lev</th>
+          <th class="p-2">Posisi</th>
+          <th class="p-2">Modal</th>
+          <th class="p-2">PnL</th>
+          <th class="p-2">PnL IDR</th>
+          <th class="p-2">Alasan</th>
+          <th class="p-2">Chart</th>
+          <th class="p-2">Aksi</th>
+        </tr>
+      </thead>
+      <tbody id="journalTable"></tbody>
+    </table>
+  </div>
+
+  <div class="bg-white p-6 rounded-2xl shadow">
+    <h2 class="font-semibold mb-4">Equity Curve (Cumulative)</h2>
+    <canvas id="equityChart"></canvas>
+  </div>
+</div>
+
+<div id="imgModal" class="fixed inset-0 hidden items-center justify-center z-50" style="background:rgba(0,0,0,.8)">
+  <img id="modalImg" class="max-h-[90%] max-w-[90%] rounded shadow-xl" />
+</div>
+
+<script>
+// SAFE jsPDF INIT (fix for undefined window.jspdf)
+let jsPDFClass = null;
+if (window.jspdf && window.jspdf.jsPDF) {
+  jsPDFClass = window.jspdf.jsPDF;
+} else if (window.jsPDF) {
+  jsPDFClass = window.jsPDF;
+} else {
+  console.error('jsPDF gagal dimuat');
+}
+
+const usdToIdr = 16750;
+let trades = JSON.parse(localStorage.getItem('trades') || '[]');
+let filteredTrades = [...trades];
+let editIndex = null;
+
+const table = document.getElementById('journalTable');
+const ctx = document.getElementById('equityChart').getContext('2d');
+const modal = document.getElementById('imgModal');
+const modalImg = document.getElementById('modalImg');
+
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: [{ label: 'Equity (USD)', data: [], borderWidth: 2 }] }
+});
+
+const normalizeLink = url => !url ? '' : (url.startsWith('http') ? url : 'https://' + url);
+
+function saveTrades() {
+  localStorage.setItem('trades', JSON.stringify(trades));
+}
+
+function applyFilter() {
+  const month = filterMonth.value;
+  const asset = filterAsset.value.toLowerCase();
+  filteredTrades = trades.filter(t => (!month || t.date.startsWith(month)) && (!asset || t.asset.toLowerCase().includes(asset)));
+  render();
+}
+
+function exportCSV() {
+  const mode = exportMode.value;
+  const data = mode === 'all' ? trades : filteredTrades;
+  if (!data.length) return alert('Tidak ada data');
+
+  let csv = 'Tanggal,Aset,Leverage,Posisi,Modal,PnL,PnL_IDR,Alasan,TradingView\n';
+  data.forEach(t => {
+    csv += `"${t.date}","${t.asset}","${t.leverage}","${t.position}","${t.capital}","${t.pnl}","${t.pnl*usdToIdr}","${(t.reason||'').replace(/"/g,'""')}","${normalizeLink(t.chartLink)}"\n`;
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trading_journal.csv';
+  a.click();
+}
+
+function exportPDF() {
+  if (!jsPDFClass) return alert('Library PDF belum siap');
+  const pdf = new jsPDFClass();
+
+  let equity = 0, win = 0;
+  filteredTrades.forEach(t => { equity += +t.pnl||0; if (t.pnl>0) win++; });
+
+  // ===== PAGE 1 : SUMMARY =====
+  pdf.setFontSize(18);
+  pdf.text('Crypto Trading Journal - Summary', 10, 15);
+  pdf.setFontSize(12);
+  pdf.text(`Total Trade : ${filteredTrades.length}`, 10, 30);
+  pdf.text(`Win Rate : ${filteredTrades.length ? ((win/filteredTrades.length)*100).toFixed(2) : 0}%`, 10, 40);
+  pdf.text(`Total PnL USD : $${equity.toFixed(2)}`, 10, 50);
+  pdf.text(`Total PnL IDR : Rp ${(equity*usdToIdr).toLocaleString('id-ID')}`, 10, 60);
+
+  // ===== PAGE 2 : EQUITY CURVE =====
+  pdf.addPage();
+  pdf.setFontSize(16);
+  pdf.text('Equity Curve', 10, 15);
+  const chartCanvas = document.getElementById('equityChart');
+  const chartImg = chartCanvas.toDataURL('image/png', 1.0);
+  pdf.addImage(chartImg, 'PNG', 10, 30, 190, 100);
+
+  // ===== PAGE 3 : TRADE HISTORY TABLE =====
+  pdf.addPage();
+  pdf.setFontSize(16);
+  pdf.text('Trade History', 10, 15);
+
+  let y = 25;
+  pdf.setFontSize(9);
+
+  const headers = ['Tanggal','Aset','Lev','Posisi','Modal','PnL','PnL IDR','Alasan'];
+  const colX = [10, 30, 50, 65, 85, 105, 125, 150];
+  const colWidth = [18, 18, 12, 18, 18, 18, 22, 40];
+
+  headers.forEach((h, i) => pdf.text(h, colX[i], y));
+  y += 6;
+  pdf.line(10, y, 200, y);
+  y += 4;
+
+  filteredTrades.forEach(t => {
+    if (y > 270) {
+      pdf.addPage();
+      y = 20;
+    }
+
+    const row = [
+      t.date,
+      t.asset,
+      (t.leverage || '-') + 'x',
+      t.position,
+      `$${t.capital}`,
+      `$${t.pnl}`,
+      `Rp ${(t.pnl*usdToIdr).toLocaleString('id-ID')}`,
+      t.reason || ''
+    ];
+
+    let maxHeight = 0;
+
+    row.forEach((cell, i) => {
+      const text = pdf.splitTextToSize(String(cell), colWidth[i]);
+      pdf.text(text, colX[i], y);
+      const height = text.length * 4;
+      if (height > maxHeight) maxHeight = height;
+    });
+
+    y += maxHeight + 2;
+  });
+
+  // ===== TOTAL PNL AT BOTTOM =====
+  y += 6;
+  pdf.line(10, y, 200, y);
+  y += 8;
+  pdf.setFontSize(11);
+  pdf.text(`TOTAL PnL USD : $${equity.toFixed(2)}`, 10, y);
+  y += 6;
+  pdf.text(`TOTAL PnL IDR : Rp ${(equity*usdToIdr).toLocaleString('id-ID')}`, 10, y);
+
+  pdf.save('trading_journal_summary.pdf');
+}
+
+function render() {
+  table.innerHTML = '';
+  chart.data.labels = [];
+  chart.data.datasets[0].data = [];
+
+  let equity = 0, win = 0;
+
+  filteredTrades.forEach((t, i) => {
+    equity += +t.pnl||0; if (t.pnl>0) win++;
+    chart.data.labels.push(t.date);
+    chart.data.datasets[0].data.push(equity);
+
+    const tr = document.createElement('tr');
+
+    tr.innerHTML = `
+      <td class="p-2">${t.date}</td>
+      <td class="p-2">${t.asset}</td>
+      <td class="p-2">${t.leverage||'-'}x</td>
+      <td class="p-2">${t.position}</td>
+      <td class="p-2">$${t.capital}</td>
+      <td class="p-2">$${t.pnl}</td>
+      <td class="p-2">Rp ${(t.pnl*usdToIdr).toLocaleString('id-ID')}</td>
+      <td class="p-2">${t.reason||''}</td>
+      <td class="p-2"></td>
+      <td class="p-2 space-x-2">
+        <button class="text-yellow-600">Edit</button>
+        <button class="text-red-600">Hapus</button>
+      </td>`;
+
+    const chartCell = tr.children[8];
+    if (t.chartImage) {
+      const im = document.createElement('img');
+      im.src = t.chartImage;
+      im.className = 'w-12 cursor-pointer';
+      im.onclick = () => { modalImg.src=t.chartImage; modal.classList.remove('hidden'); };
+      chartCell.appendChild(im);
+    }
+    if (t.chartLink) {
+      const a = document.createElement('a');
+      a.href = normalizeLink(t.chartLink);
+      a.target = '_blank';
+      a.textContent = 'TV';
+      a.className = 'text-blue-600 underline ml-2';
+      chartCell.appendChild(a);
+    }
+
+    const realIndex = trades.indexOf(t);
+    tr.children[9].children[0].onclick = () => editTrade(realIndex);
+    tr.children[9].children[1].onclick = () => deleteTrade(realIndex);
+
+    table.appendChild(tr);
+  });
+
+  chart.update();
+  statTotalTrade.textContent = filteredTrades.length;
+  statWinRate.textContent = filteredTrades.length ? ((win/filteredTrades.length)*100).toFixed(2)+'%' : '0%';
+  statTotalUsd.textContent = '$'+equity.toFixed(2);
+  statTotalIdr.textContent = 'Rp '+(equity*usdToIdr).toLocaleString('id-ID');
+}
+
+journalForm.onsubmit = e => {
+  e.preventDefault();
+  const file = chartImage.files[0];
+  const reader = new FileReader();
+  reader.onload = () => {
+    const trade = {
+      date: date.value,
+      asset: asset.value,
+      leverage: leverage.value,
+      position: position.value,
+      capital: +capital.value||0,
+      pnl: +pnl.value||0,
+      reason: reason.value,
+      chartLink: chartLink.value,
+      chartImage: reader.result || null
+    };
+    if (editIndex!==null) { trades[editIndex]=trade; editIndex=null; }
+    else trades.push(trade);
+    filteredTrades=[...trades];
+    saveTrades();
+    journalForm.reset();
+    render();
+  };
+  if (file) reader.readAsDataURL(file); else reader.onload();
+};
+
+function editTrade(i) {
+  const t = trades[i];
+  editIndex = i;
+  date.value=t.date; asset.value=t.asset; leverage.value=t.leverage;
+  capital.value=t.capital; pnl.value=t.pnl; position.value=t.position;
+  reason.value=t.reason; chartLink.value=t.chartLink;
+}
+
+function deleteTrade(i) {
+  if (!confirm('Hapus trade ini?')) return;
+  trades.splice(i,1);
+  filteredTrades=[...trades];
+  saveTrades();
+  render();
+}
+
+modal.onclick = () => modal.classList.add('hidden');
+
+btnFilter.onclick = applyFilter;
+btnCSV.onclick = exportCSV;
+btnPDF.onclick = exportPDF;
+
+render();
+</script>
+</body>
+</html>
